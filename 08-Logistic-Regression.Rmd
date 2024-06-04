@@ -15,6 +15,7 @@ knitr::opts_chunk$set( message=FALSE, warning=FALSE )
 
 # PACOTES 
 library(tidymodels)
+library(GGally)
 
 # PRETTY DOC
 library(gt)
@@ -45,12 +46,13 @@ The code block below loads the data and performs some preprocessing tasks.
 df0 <- read.csv("_datasets/TelcoData.csv") |> 
   janitor::clean_names() |>
   select(churn, gender, senior_citizen, tenure, monthly_charges) |>
-  mutate(churn=factor(churn, levels=c("Yes", "No")),
+  mutate(churn=factor(churn, levels=c("Yes", "No"), labels=c("Churned","Renewed")),
          senior_citizen = factor(senior_citizen, levels=c(1, 0), labels=c("Yes", "No")),
          across(where(is.character), as.factor))
 
 str(df0)
 ```
+
 
 ```{r echo=FALSE}
 summarytools::dfSummary(df0, style="multiline", 
@@ -99,47 +101,26 @@ df.split7030 <- initial_split(df0, prop=0.7, strata=churn)
 df.train <- training(df.split7030)
 df.test  <- testing(df.split7030)
 
-dim(df.train); dim(df.test)
+df.split7030
 ```
 
 \
-
-```{r}
-df.split7030
-```
 
 ## EDA
 
 Perform EDA on the training set to:
 
--   Decide how to work with missing values,\
--   Decide how to work with outliers,\
+-   Decide how to work with missing values, if there are missing values\
+-   Identify relationships between the variables\
+-   Decide how to work with outliers,if there are outliers that impact the relationships\
 -   Decide whether to turn numerical variables to categorical variables\
 
 You may need to go back to pre-processing depending on the results of the EDA.
 
 \
 
-**OUTCOME VARIABLE**
-
-```{r echo=FALSE}
-df.train |> summarise(n=n(), .by=churn) |> 
-  mutate(pct = n/sum(n)) |> 
-  gt(rowname_col="stub", locale="pt") |> sub_missing() |>
-  fmt_percent(pct, decimals=0) |> fmt_integer(n) |> 
-  tab_options(
-    heading.align="left", heading.title.font.size=pct(110), heading.subtitle.font.size=pct(90),
-    column_labels.font.weight="bold", column_labels.font.size=pct(80),
-    column_labels.text_transform="uppercase", column_labels.background.color="gray95",
-    data_row.padding=px(2), row_group.padding=px(2), row_group.font.weight="bold",
-    table.font.size=pct(90), source_notes.font.size = pct(70),
-  ) |> 
-  tab_header(title = md("**Table: Churn status**"))
-```
-
 \
 
-**CATEGORICAL VARIABLES**
 
 ```{r include=FALSE}
 PlotCategorical <- function(df, cat_var, title) {
@@ -147,8 +128,7 @@ PlotCategorical <- function(df, cat_var, title) {
 
   df.plt <- df |> 
     select({{cat_var}}, churn) |>
-    summarise(n=n(), .by=c({{cat_var}}, churn)) |> 
-    mutate(churn = if_else(churn=="Yes", "Cancelled", "Renewed"))
+    summarise(n=n(), .by=c({{cat_var}}, churn))
   
   p1 <- df.plt |> 
     ggplot(aes(x={{cat_var}}, y=n, fill=churn)) +
@@ -156,7 +136,7 @@ PlotCategorical <- function(df, cat_var, title) {
     scale_y_continuous(expand=expansion(mult=c(0,.05))) +
     theme(legend.position="top", 
           panel.grid.major.x=element_blank()) +
-    scale_fill_brewer(palette="Dark2", direction=-1) +
+    scale_fill_brewer(palette="Set1") +
     labs(x=NULL, y="Frequency")
   
   p2 <- df.plt |> 
@@ -171,7 +151,7 @@ PlotCategorical <- function(df, cat_var, title) {
     scale_y_continuous(expand=expansion(mult=c(0,.18)), breaks=NULL) +
     theme(legend.position="top", 
           panel.grid.major.x=element_blank()) +
-    scale_fill_brewer(palette="Dark2", direction=-1) +
+    scale_fill_brewer(palette="Set1") +
     labs(x=NULL, y="Frequency")
   
   p3 <- df.plt |> 
@@ -180,7 +160,7 @@ PlotCategorical <- function(df, cat_var, title) {
     scale_y_continuous(expand=expansion(mult=c(0,.05))) +
     theme(legend.position="top", 
           panel.grid.major.x=element_blank()) +
-    scale_fill_brewer(palette="Set1") +
+    scale_fill_brewer(palette="Dark2", direction=-1) +
     labs(x=NULL, y="Frequency")
   
   p4 <- df.plt |> 
@@ -194,77 +174,141 @@ PlotCategorical <- function(df, cat_var, title) {
     scale_y_continuous(expand=expansion(mult=c(0,.18)), breaks=NULL) +
     theme(legend.position="top", 
           panel.grid.major.x=element_blank()) +
-    scale_fill_brewer(palette="Set1") +
+    scale_fill_brewer(palette="Dark2", direction=-1) +
     labs(x=NULL, y="Frequency")
 
   return(
     (p1+p2+ plot_layout(axis_titles="collect"))/
     (p3+p4+ plot_layout(axis_titles="collect")) +
-      plot_annotation(title=glue::glue("Churn vs \"{stringr::str_to_upper(title)}\""))
+      plot_annotation(title=glue::glue("Churn vs {stringr::str_to_upper(title)}"))
   )
   
 }
 ```
 
+
+### Categorical variables
+
+The 4.929 observations in the training dataset have 27% churned customers and 73% renewed customers.
+
+```{r}
+summarytools::dfSummary(df.train |> select(is.factor), style="multiline", 
+                        plain.ascii=F, graph.col=F, valid.col=F) |> 
+  knitr::kable()
+```
+
 \
 
-```{r echo=FALSE, fig.width=5, fig.height=5}
-PlotCategorical(df.train, gender, "Gender")
+### Numeric variables
+
+```{r}
+summarytools::dfSummary(df.train |> select(is.numeric), 
+                        style="multiline", plain.ascii=F, graph.col=F, valid.col=F) |> 
+  knitr::kable()
+```
+
+
+\
+
+### Explanatory variables
+
+```{r echo=FALSE, fig.asp=1, fig.width=5}
+ggbivariate(df.train, 
+            outcome="churn", 
+            rowbar_args = list(colour = "white",
+                               size = 4,
+                               # fontface = "bold",
+                               label_format = scales::label_percent(accurary = 1)),
+            types = list(comboVertical="autopoint"),
+            title = "Plots of Churn vs explanatory variables") +
+scale_fill_brewer(palette="Set1") +
+scale_color_brewer(palette="Set1")
 ```
 
 I would guess gender will not be very useful in predicting churn. The distribution of churn is similar for both male and female classes.
 
-\
+The flag for senior citizens is more interesting. Overall, there are a lot less senior citizens in the dataset than non-senior citizens - senior citizens account for only 16% of all observations. However, elderly customers are almost twice as likely to churn than younger customers.
 
 ```{r echo=FALSE, fig.width=5, fig.height=5}
-PlotCategorical(df.train, senior_citizen, "IS Senior Citizen?")
+PlotCategorical(df.train, senior_citizen, "flag of Senior Citizens")
 ```
 
-\
+
 
 ```{r include=FALSE}
 rm(p1,p2,p3,p4,df.plt); gc()
 ```
 
+
 \
 
-**NUMERICAL VARIABLES**
+Regarding the numerical variables, from the boxplots we can identify a few outliers in Tenure of churned customers, assuming the tukey interquartile range criteria to identify outliers. However, the outliers are not extreme and are not likely to impact the relationships between the variables.
 
-```{r}
-summarytools::descr(df.train)
+```{r echo=FALSE, fig.width=5, fig.asp=.8}
+df.train |> select(is.numeric, churn) |> 
+  pivot_longer(-churn) |>
+  mutate(name = if_else(name=="tenure", "Tenure (months)", "Monthly charges")) |> 
+  ggplot(aes(y=churn, fill=churn, color=churn, x=value)) +
+  geom_boxplot(outlier.colour="red", alpha=.5, staplewidth=.5) +
+  theme(legend.position="none", panel.grid.major.y=element_blank()) +
+  facet_wrap(~name, scales="free", ncol=1) +
+  scale_fill_brewer(palette="Set1") + scale_color_brewer(palette="Set1") +
+  labs(title="Boxplots of numerical variables by churn outcome", x=NULL, y=NULL)
 ```
 
 \
 
-```{r echo=FALSE, fig.width=6.5, fig.asp=.4}
-df.train |> select(is.numeric) |> 
-  pivot_longer(everything()) |> 
-  mutate(Mean = mean(value), 
-         q1 = quantile(value, .25), 
-         Median = median(value), 
-         q3 = quantile(value, .75),
-         .by=c(name)) |>
-  ggplot(aes(value)) +
-  geom_histogram(bins=40, color="white", fill="slategray", alpha=.7) +
-  geom_vline(aes(xintercept=Mean, color="Mean"), show.legend=T, linewidth=.8) +
-  geom_vline(aes(xintercept=Median, color="Median"), show.legend=T, linewidth=.8) +
-  geom_vline(aes(xintercept=q1, color="q1/q3"), show.legend=T, linewidth=.8) +
-  geom_vline(aes(xintercept=q3, color="q1/q3"), show.legend=T, linewidth=.8) +
-  scale_color_manual(name="", 
-                     values=c("Mean"="black", "Median"="blue", "q1/q3"="red")) +
-  theme(legend.position="top") +
-  facet_wrap(~name, scales="free", ncol=2) +
-  labs(title="Histograms of numerical variables", x=NULL, y="Frequency")
+Also the numerical variables, both monthly charges and tenure have moderate to low skewness (normal distribution skewness is zero) and negative or low excess kurtosis (normal distribution excess kurtosis is zero), which would indicate that there are no extreme outliers.
+
+
+```{r echo=FALSE}
+options(scipen=999)
+inner_join(
+  summarytools::descr(filter(df.train, churn=="Churned")) |> 
+    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
+  summarytools::descr(filter(df.train, churn=="Renewed")) |> 
+    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
+  join_by(id, name), suffix=c(".Yes", ".No")
+) |> group_by(name) |> 
+  gt(rowname_col="stub", locale="pt") |> sub_missing() |>
+  fmt_number(starts_with("churn"), decimals=2) |> 
+  tab_options(
+    heading.align="left", heading.title.font.size=pct(110), heading.subtitle.font.size=pct(90),
+    column_labels.font.weight="bold", column_labels.font.size=pct(80),
+    column_labels.text_transform="uppercase", column_labels.background.color="gray95",
+    data_row.padding=px(2), row_group.padding=px(2), row_group.font.weight="bold",
+    table.font.size=pct(90), source_notes.font.size = pct(70),
+  ) |> 
+  tab_header(title = md("**Table: Summary statistics for each variable**"),
+     subtitle = md("*by churn status*"))
+options(scipen=000)
 ```
 
 \
-For numeric variables, I would expect the distributions of each variable against the outcome variable to be different from each other (churn x no churn) otherwise the explanatory variable would add little information about the outcome.
+
+The distribution of the numerical variables does not seem to follow a normal distribution. The correlation between Tenure in months and the Monthly charges is statistically significant and of moderate to low strength, even among churned/ renewed customers.
+
+```{r echo=FALSE, fig.asp=1, fig.width=6}
+ggpairs(df.train |> select(is.numeric, churn), aes(color=churn, fill=churn),
+        columnLabels=c("Tenure (months)", "Monthly charges", "OUTCOME: Churn"),
+        diag="blank", axisLabels="internal", 
+        lower=list(continuous=wrap("density", alpha=.5), 
+                   combo=wrap("facethist", alpha=.5, bins=30)),
+        upper=list(combo=wrap("autopoint")),
+        title="Pairplots of numerical variables against Churn") +
+  scale_fill_brewer(palette="Set1") +
+  scale_color_brewer(palette="Set1")
+```
+
+
+\
+
+For numeric variables, I would expect the distributions of each variable against the outcome variable to be different from each other (churned x renewed) otherwise the explanatory variable would add little information about the outcome.
 
 ```{r echo=FALSE, fig.asp=.7, fig.width=6.5}
 df.train |> select(is.numeric, churn) |> 
-  mutate(churn = if_else(churn=="Yes", "Customers cancelled (churn=Yes)", 
-                         "Customers renewed (churn=No)")) |> 
   pivot_longer(is.numeric) |> 
+  mutate(name = if_else(name=="tenure", "Tenure (months)", "Monthly charges")) |> 
   mutate(Mean = mean(value), 
          q1 = quantile(value, .25), 
          Median = median(value), 
@@ -285,38 +329,15 @@ df.train |> select(is.numeric, churn) |>
        x=NULL, y="Frequency")
 ```
 
-\
 
-```{r echo=FALSE}
-options(scipen=999)
-inner_join(
-  summarytools::descr(filter(df.train, churn=="Yes")) |> 
-    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
-  summarytools::descr(filter(df.train, churn=="No")) |> 
-    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
-  join_by(id, name), suffix=c(".Yes", ".No")
-) |> group_by(name) |> 
-  gt(rowname_col="stub", locale="pt") |> sub_missing() |>
-  fmt_number(starts_with("churn"), decimals=2) |> 
-  tab_options(
-    heading.align="left", heading.title.font.size=pct(110), heading.subtitle.font.size=pct(90),
-    column_labels.font.weight="bold", column_labels.font.size=pct(80),
-    column_labels.text_transform="uppercase", column_labels.background.color="gray95",
-    data_row.padding=px(2), row_group.padding=px(2), row_group.font.weight="bold",
-    table.font.size=pct(90), source_notes.font.size = pct(70),
-  ) |> 
-  tab_header(title = md("**Table: Summary statistics for each variable**"),
-     subtitle = md("*by churn status*"))
-options(scipen=000)
-```
 
 \
 
 ## Set up a recipe
 
 ```{r}
-(rcp.df0 = recipe(churn ~ . , data=df.train) |> 
-  step_dummy(gender, senior_citizen))
+rcp.df0 <- recipe(churn ~ . , data=df.train) |> 
+  step_dummy(gender, senior_citizen)
 ```
 
 In case you need to prepare and execute a recipe manually, you can follow these steps:
@@ -344,9 +365,6 @@ ii) usingthe `bake()` command to (pre-)process the data as determined by the rec
   fit(df.train))
 ```
 
-```{r}
-log.reg.wf 
-```
 
 \
 
