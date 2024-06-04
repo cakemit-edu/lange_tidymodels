@@ -1,0 +1,412 @@
+---
+title:  Chapter 8. Logistic Regression — Handling Imbalanced Data
+author: Carsten Lange
+date:   "`r format(as.Date('2024-02-01'), '%m/%Y')`"
+
+output:
+  bookdown::html_document2:
+    toc: yes
+    toc_float: yes
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message=FALSE, warning=FALSE )
+
+# PACOTES 
+library(tidymodels)
+
+# PRETTY DOC
+library(gt)
+library(patchwork)
+
+theme_set(theme_light(base_size=9))
+theme_update(
+  panel.grid.minor = element_blank(),
+  panel.grid.major = element_line(color="gray95"),
+  plot.title = element_text(size = 12, colour = "gray30", face = "bold"),
+  plot.subtitle = element_text(face = 'italic', colour = "gray50", size = 10),
+  plot.caption = element_text(colour = "gray50", hjust=0, size = 8),
+  legend.title = element_blank(),
+)
+```
+
+# Unbalanced outcomes
+
+Analyze churn behavior for customers of the *Telco* company. *Telco* is a fictional telecommunications company that offers various phone and Internet services. For your analysis, you will use the IBM *Telco* customer churn dataset. In this dataset, the `churn` column indicates if a customer departed within the last month `(churn=Yes)` or not `(churn=No)`. Other columns contain various predictor variables for each of the 7.043 customers, such as `gender` (`Female` or `Male`), `senior_citizen` (0 for *No* or 1 for *Yes*), `tenure` (months of membership), as well as `monthly_charges` (in US-\$).
+
+\
+
+## Preprocess data
+
+The code block below loads the data and performs some preprocessing tasks.
+
+```{r}
+df0 <- read.csv("_datasets/TelcoData.csv") |> 
+  janitor::clean_names() |>
+  select(churn, gender, senior_citizen, tenure, monthly_charges) |>
+  mutate(churn=factor(churn, levels=c("Yes", "No")),
+         senior_citizen = factor(senior_citizen, levels=c(1, 0), labels=c("Yes", "No")),
+         across(where(is.character), as.factor))
+
+str(df0)
+```
+
+```{r echo=FALSE}
+summarytools::dfSummary(df0, style="multiline", 
+                        plain.ascii=F, graph.col=F, valid.col=F) |> 
+  knitr::kable()
+```
+
+Note that manipulations of outcome variables are sometimes not executed on the test dataset when defined in a *recipe*. So, When should we pre-process the data, and when should we use a recipe to pre-process data? Generally, using a recipe is advisable because we can reuse a recipe on other dataframes.
+
+Typical data pre-processing tasks to be performed before a splitting the data and applying a recipe to the training data are:
+
+-   Clean up the variable names (`clean_names()` changes variable names to *snake_case* by default)
+
+-   Choose the outcome and explanatory variables for the analysis (`select()`).
+
+-   Convert the categorical variables to type `factor`, which is necessary because almost all `tidymodels` classification models require the variables to be of type `factor`.
+
+-   When transforming outcome variables, it is wise to always do this outside of a recipe. This is because the recipe usually will not be applied the transformation to the test data. If a recipe is later used on a new dataset for prediction, this dataset might not contain a column for the outcome variable. And even if the dataset does contain the outcome variable, such as the testing data, some `step_` commands, including `step_normalize()`, ignore the outcome variable to avoid data leakage.
+
+-   Specifically for binary classification modeling, convert the outcome variable to set the reference category as the first level. For example you should ensure that "Yes" (or the reference category of your choice) is treated as the positive class (reference class) and "No" as the negative class (`mutate(outcome_var = factor(outcome_var, levels=c("Yes", "No")))`). This is important when you later interpret metrics such as *sensitivity* and *specificity*.
+
+::: {.alert .alert-danger}
+Should I check on missing values before or after splitting the data?
+
+-   Are missing values only in the outcome variable? Are there missing values in the explanatory variables?
+
+-   Are missing values in the explanatory variables a very small proportion of the data? So small that we can throw out those observations?
+
+-   Is there a pattern to missing values? Is this pattern likely to continue for new data?
+
+-   If the missing values are missing at random, should we impute them?
+
+-   If the missing values are not missing at random, should we remove them?
+
+-   The missing values might be imputed using the training data, and the imputation method might be different for the testing data...
+:::
+
+\
+
+## Split the data
+
+```{r}
+set.seed(789)
+df.split7030 <- initial_split(df0, prop=0.7, strata=churn)
+
+df.train <- training(df.split7030)
+df.test  <- testing(df.split7030)
+
+dim(df.train); dim(df.test)
+```
+
+\
+
+```{r}
+df.split7030
+```
+
+## EDA
+
+Perform EDA on the training set to:
+
+-   Decide how to work with missing values,\
+-   Decide how to work with outliers,\
+-   Decide whether to turn numerical variables to categorical variables\
+
+You may need to go back to pre-processing depending on the results of the EDA.
+
+\
+
+**OUTCOME VARIABLE**
+
+```{r echo=FALSE}
+df.train |> summarise(n=n(), .by=churn) |> 
+  mutate(pct = n/sum(n)) |> 
+  gt(rowname_col="stub", locale="pt") |> sub_missing() |>
+  fmt_percent(pct, decimals=0) |> fmt_integer(n) |> 
+  tab_options(
+    heading.align="left", heading.title.font.size=pct(110), heading.subtitle.font.size=pct(90),
+    column_labels.font.weight="bold", column_labels.font.size=pct(80),
+    column_labels.text_transform="uppercase", column_labels.background.color="gray95",
+    data_row.padding=px(2), row_group.padding=px(2), row_group.font.weight="bold",
+    table.font.size=pct(90), source_notes.font.size = pct(70),
+  ) |> 
+  tab_header(title = md("**Table: Churn status**"))
+```
+
+\
+
+**CATEGORICAL VARIABLES**
+
+```{r include=FALSE}
+PlotCategorical <- function(df, cat_var, title) {
+  category <- enquo(cat_var)
+
+  df.plt <- df |> 
+    select({{cat_var}}, churn) |>
+    summarise(n=n(), .by=c({{cat_var}}, churn)) |> 
+    mutate(churn = if_else(churn=="Yes", "Cancelled", "Renewed"))
+  
+  p1 <- df.plt |> 
+    ggplot(aes(x={{cat_var}}, y=n, fill=churn)) +
+    geom_col(position=position_dodge2(padding=.05)) +
+    scale_y_continuous(expand=expansion(mult=c(0,.05))) +
+    theme(legend.position="top", 
+          panel.grid.major.x=element_blank()) +
+    scale_fill_brewer(palette="Dark2", direction=-1) +
+    labs(x=NULL, y="Frequency")
+  
+  p2 <- df.plt |> 
+    mutate(pct = n/sum(n), .by={{cat_var}}) |> 
+    ggplot(aes(x={{cat_var}}, y=n, fill=churn)) +
+    geom_col(color="white") +
+    geom_text(aes(label=scales::percent(pct, accuracy=1)), 
+              position=position_stack(vjust=.5),
+              check_overlap=T, size=3) +
+    geom_text(aes(label=scales::number(after_stat(y), accuracy=1), group={{cat_var}}),
+              stat="summary", fun=sum, vjust=-1, size=3) +
+    scale_y_continuous(expand=expansion(mult=c(0,.18)), breaks=NULL) +
+    theme(legend.position="top", 
+          panel.grid.major.x=element_blank()) +
+    scale_fill_brewer(palette="Dark2", direction=-1) +
+    labs(x=NULL, y="Frequency")
+  
+  p3 <- df.plt |> 
+    ggplot(aes(x=churn, y=n, fill={{cat_var}})) +
+    geom_col(position=position_dodge2(padding=.05)) +
+    scale_y_continuous(expand=expansion(mult=c(0,.05))) +
+    theme(legend.position="top", 
+          panel.grid.major.x=element_blank()) +
+    scale_fill_brewer(palette="Set1") +
+    labs(x=NULL, y="Frequency")
+  
+  p4 <- df.plt |> 
+    mutate(pct = n/sum(n), .by=churn) |> 
+    ggplot(aes(x=churn, y=n, fill={{cat_var}})) +
+    geom_col(color="white") +
+    geom_text(aes(label=scales::percent(pct, accuracy=1)), 
+              position=position_stack(vjust=.5), check_overlap=T, size=3) +
+    geom_text(aes(label=scales::number(after_stat(y), accuracy=1), group=churn),
+              stat="summary", fun=sum, vjust=-1, size=3) +
+    scale_y_continuous(expand=expansion(mult=c(0,.18)), breaks=NULL) +
+    theme(legend.position="top", 
+          panel.grid.major.x=element_blank()) +
+    scale_fill_brewer(palette="Set1") +
+    labs(x=NULL, y="Frequency")
+
+  return(
+    (p1+p2+ plot_layout(axis_titles="collect"))/
+    (p3+p4+ plot_layout(axis_titles="collect")) +
+      plot_annotation(title=glue::glue("Churn vs \"{stringr::str_to_upper(title)}\""))
+  )
+  
+}
+```
+
+\
+
+```{r echo=FALSE, fig.width=5, fig.height=5}
+PlotCategorical(df.train, gender, "Gender")
+```
+
+I would guess gender will not be very useful in predicting churn. The distribution of churn is similar for both male and female classes.
+
+\
+
+```{r echo=FALSE, fig.width=5, fig.height=5}
+PlotCategorical(df.train, senior_citizen, "IS Senior Citizen?")
+```
+
+\
+
+```{r include=FALSE}
+rm(p1,p2,p3,p4,df.plt); gc()
+```
+
+\
+
+**NUMERICAL VARIABLES**
+
+```{r}
+summarytools::descr(df.train)
+```
+
+\
+
+```{r echo=FALSE, fig.width=6.5, fig.asp=.4}
+df.train |> select(is.numeric) |> 
+  pivot_longer(everything()) |> 
+  mutate(Mean = mean(value), 
+         q1 = quantile(value, .25), 
+         Median = median(value), 
+         q3 = quantile(value, .75),
+         .by=c(name)) |>
+  ggplot(aes(value)) +
+  geom_histogram(bins=40, color="white", fill="slategray", alpha=.7) +
+  geom_vline(aes(xintercept=Mean, color="Mean"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=Median, color="Median"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=q1, color="q1/q3"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=q3, color="q1/q3"), show.legend=T, linewidth=.8) +
+  scale_color_manual(name="", 
+                     values=c("Mean"="black", "Median"="blue", "q1/q3"="red")) +
+  theme(legend.position="top") +
+  facet_wrap(~name, scales="free", ncol=2) +
+  labs(title="Histograms of numerical variables", x=NULL, y="Frequency")
+```
+
+\
+For numeric variables, I would expect the distributions of each variable against the outcome variable to be different from each other (churn x no churn) otherwise the explanatory variable would add little information about the outcome.
+
+```{r echo=FALSE, fig.asp=.7, fig.width=6.5}
+df.train |> select(is.numeric, churn) |> 
+  mutate(churn = if_else(churn=="Yes", "Customers cancelled (churn=Yes)", 
+                         "Customers renewed (churn=No)")) |> 
+  pivot_longer(is.numeric) |> 
+  mutate(Mean = mean(value), 
+         q1 = quantile(value, .25), 
+         Median = median(value), 
+         q3 = quantile(value, .75),
+         .by=c(churn, name)) |>
+  ggplot(aes(x=value)) +
+  geom_histogram(bins=40, position="dodge", 
+                 alpha=.7, color="white", fill="slategray") +
+  geom_vline(aes(xintercept=Mean, color="Mean"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=Median, color="Median"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=q1, color="q1/q3"), show.legend=T, linewidth=.8) +
+  geom_vline(aes(xintercept=q3, color="q1/q3"), show.legend=T, linewidth=.8) +
+  scale_color_manual(name="", 
+                     values=c("Mean"="black", "Median"="blue", "q1/q3"="red")) +
+  facet_wrap(churn~name, scales="free", ncol=2) +
+  theme(legend.position="top") +
+  labs(title="Histograms of numerical variables by churn outcome", 
+       x=NULL, y="Frequency")
+```
+
+\
+
+```{r echo=FALSE}
+options(scipen=999)
+inner_join(
+  summarytools::descr(filter(df.train, churn=="Yes")) |> 
+    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
+  summarytools::descr(filter(df.train, churn=="No")) |> 
+    as.data.frame() |> rownames_to_column("id") |> pivot_longer(-id, values_to="churn"),
+  join_by(id, name), suffix=c(".Yes", ".No")
+) |> group_by(name) |> 
+  gt(rowname_col="stub", locale="pt") |> sub_missing() |>
+  fmt_number(starts_with("churn"), decimals=2) |> 
+  tab_options(
+    heading.align="left", heading.title.font.size=pct(110), heading.subtitle.font.size=pct(90),
+    column_labels.font.weight="bold", column_labels.font.size=pct(80),
+    column_labels.text_transform="uppercase", column_labels.background.color="gray95",
+    data_row.padding=px(2), row_group.padding=px(2), row_group.font.weight="bold",
+    table.font.size=pct(90), source_notes.font.size = pct(70),
+  ) |> 
+  tab_header(title = md("**Table: Summary statistics for each variable**"),
+     subtitle = md("*by churn status*"))
+options(scipen=000)
+```
+
+\
+
+## Set up a recipe
+
+```{r}
+(rcp.df0 = recipe(churn ~ . , data=df.train) |> 
+  step_dummy(gender, senior_citizen))
+```
+
+In case you need to prepare and execute a recipe manually, you can follow these steps:
+
+i)  prepare the recipe for execution: `RecipeWinePrep <- RecipeWine |> prep()`,
+ii) usingthe `bake()` command to (pre-)process the data as determined by the recipe, e.g., the testing data: `DataTestProc <- bake(RecipeWinePrep, new_data=DataTest)`.
+
+\
+
+## Specify the model
+
+```{r}
+(log.reg.model <- logistic_reg(mode="classification") |> 
+  set_engine("glm"))
+```
+
+\
+
+## Fit the model
+
+```{r}
+(log.reg.wf <- workflow() |> 
+  add_recipe(rcp.df0) |> 
+  add_model(log.reg.model) |> 
+  fit(df.train))
+```
+
+```{r}
+log.reg.wf 
+```
+
+\
+
+## Test predictions
+
+```{r}
+df.test.predicted <- augment(log.reg.wf, new_data=df.test)
+
+str(df.test.predicted)
+```
+
+\
+
+```{r fig.width=4}
+conf_mat(df.test.predicted, truth=churn, estimate=.pred_class)
+```
+
+\
+
+```{r}
+ValidateClassification <- metric_set(accuracy, sensitivity, specificity)
+ValidateClassification(df.test.predicted, truth=churn, estimate=.pred_class)
+```
+
+\
+
+At first glance,everything looks good. Accuracy is about 78%,
+
+$$
+\frac{TP+TN}{TP+TN+FP+FN} = \frac{239+1.403}{239+1.403+322+150} = \frac{1.642}{2.114} = 78\%
+$$
+
+specificity (negativity) is even 90%
+
+$$
+\frac{TN}{TN+FN} = \frac{1.403}{1.403+150} = 90\%
+$$
+
+However,the result for sensitivity (positivity) is not good at all. Only 43% of the customers who churned were correctly identified
+
+$$
+\frac{TP}{TP+FP} = \frac{239}{239+322} = 43\%
+$$
+
+Simply flipping a coin to determine if a customer churns or not would have given us a sensitivity of about 50%!
+
+\
+
+# Balanced outcomes
+
+\
+
+\
+
+# Further reading {#references}
+
+Nijman S., Leewenberg A., et al. (2022). *Missing data is pooly handled and reported in prediction model studies using machine learning: a literature review*. Journal of Clinical Epidemiology, 142: 218-229. [online](https://doi.org/10.1016/j.jclinepi.2021.11.023)
+
+\
+Sperrin M., Martin G. P., et al. (2020) *Missing data should be handled differently for prediction than for description or causal explanation.* Journal of Clinical Epidemiology, 125: 183-187. [online](https://doi.org/10.1016/j.jclinepi.2020.03.028)
+
+\
+Saar-Tsechansky M. and Provost F. (2007) *Handling missing values when applying classification models.* Journal of Machine Learning Research; 8: 1623-1657. [online](https://www.jmlr.org/papers/volume8/saar-tsechansky07a/saar-tsechansky07a.pdf)
